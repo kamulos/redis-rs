@@ -465,7 +465,7 @@ impl<C> Future for Request<C> {
                 Next::Done.into()
             }
             Err((target, err)) => {
-                trace!("Request error {}", err);
+                log::warn!("Request error {}", err);
 
                 let request = this.request.as_mut().unwrap();
                 if request.retry >= this.retry_params.number_of_retries {
@@ -596,6 +596,7 @@ where
         initial_nodes: &[ConnectionInfo],
         params: &ClusterParams,
     ) -> RedisResult<ConnectionMap<C>> {
+        log::info!("Creating initial connections to nodes: {initial_nodes:?}");
         let connections = stream::iter(initial_nodes.iter().cloned())
             .map(|info| {
                 let params = params.clone();
@@ -605,7 +606,7 @@ where
                     match result {
                         Ok(conn) => Some((addr, async { conn }.boxed().shared())),
                         Err(e) => {
-                            trace!("Failed to connect to initial node: {:?}", e);
+                            log::error!("Failed to connect to initial node: {e}");
                             None
                         }
                     }
@@ -626,6 +627,7 @@ where
                 "Failed to create initial connections",
             )));
         }
+        log::info!("create_initial_connections() -> {connections:?}");
         Ok(connections)
     }
 
@@ -668,13 +670,17 @@ where
                             &inner.cluster_params,
                         )
                         .await;
-                        if let Ok(conn) = conn {
-                            connections.insert(addr, async { conn }.boxed().shared());
+                        match conn {
+                            Ok(conn) => {
+                                connections.insert(addr, async { conn }.boxed().shared());
+                            }
+                            Err(e) => log::error!("error in refresh_connections: {e}"),
                         }
                         connections
                     },
                 )
                 .await;
+            log::info!("refresh_connections() -> {connections:?}");
             write_guard.0 = mem::take(&mut connections);
         }
     }
@@ -685,11 +691,13 @@ where
         let mut connections = mem::take(&mut write_guard.0);
         let slots = &mut write_guard.1;
         let mut result = Ok(());
-        for (_, conn) in connections.iter_mut() {
+        for (name, conn) in connections.iter_mut() {
+            log::info!("asking node {name} for slots");
             let mut conn = conn.clone().await;
             let value = match conn.req_packed_command(&slot_cmd()).await {
                 Ok(value) => value,
                 Err(err) => {
+                    log::error!("error in refresh_slots, that could be overwritten in the next iteration: {err}");
                     result = Err(err);
                     continue;
                 }
@@ -701,7 +709,10 @@ where
                     result = Ok(());
                     break;
                 }
-                Err(err) => result = Err(err),
+                Err(err) => {
+                    log::error!("error in refresh_slots, that could be overwritten in the next iteration: {err}");
+                    result = Err(err);
+                }
             }
         }
         result?;
@@ -720,13 +731,18 @@ where
                 |mut connections, (addr, connection)| async {
                     let conn =
                         Self::get_or_create_conn(addr, connection, &inner.cluster_params).await;
-                    if let Ok(conn) = conn {
-                        connections.insert(addr.to_string(), async { conn }.boxed().shared());
+                    match conn {
+                        Ok(conn) => {
+                            connections.insert(addr.to_string(), async { conn }.boxed().shared());
+                        }
+                        Err(e) => log::error!("error in refresh_slots: {e}"),
                     }
                     connections
                 },
             )
             .await;
+
+        log::info!("refresh_slots() -> {:?}", write_guard.0);
 
         Ok(())
     }
@@ -734,7 +750,7 @@ where
     fn build_slot_map(slot_map: &mut SlotMap, slots_data: Vec<Slot>) -> RedisResult<()> {
         slot_map.clear();
         slot_map.fill_slots(slots_data);
-        trace!("{:?}", slot_map);
+        log::info!("slot map: {:?}", slot_map);
         Ok(())
     }
 
@@ -1412,6 +1428,7 @@ async fn connect_and_check<C>(node: &str, params: ClusterParams) -> RedisResult<
 where
     C: ConnectionLike + Connect + Send + 'static,
 {
+    log::info!("connecting to node: {node}");
     let read_from_replicas = params.read_from_replicas;
     let connection_timeout = params.connection_timeout;
     let response_timeout = params.response_timeout;
