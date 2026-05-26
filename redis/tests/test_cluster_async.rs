@@ -62,6 +62,68 @@ mod cluster_async {
     }
 
     #[async_test]
+    async fn async_cluster_writing_script() {
+        let cluster = TestClusterContext::new_with_config(RedisClusterConfiguration {
+            num_nodes: 2,
+            num_replicas: 1,
+            ..Default::default()
+        });
+        let mut connection = cluster.async_connection().await;
+        let script = redis::Script::new(r#"return redis.call("SET", "key", "value")"#);
+        let _: () = script
+            .key("key")
+            .invoke_async(&mut connection)
+            .await
+            .unwrap();
+    }
+
+    #[async_test]
+    async fn async_cluster_failover_script() {
+        let cluster = TestClusterContext::new_with_config(RedisClusterConfiguration {
+            num_nodes: 2,
+            num_replicas: 1,
+            ..Default::default()
+        });
+        let mut connection = cluster.async_connection().await;
+
+        let script = redis::Script::new(r#"return redis.call("SET", "key", "value")"#);
+
+        let _: () = script
+            .key("key")
+            .invoke_async(&mut connection)
+            .await
+            .unwrap();
+
+        let string: String = redis::cmd("CLUSTER")
+            .arg("NODES")
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+
+        println!("{string}");
+        println!("performing failover now...");
+
+        connection
+            .route_command(
+                redis::cmd("CLUSTER").arg("FAILOVER").clone(),
+                RoutingInfo::SingleNode(SingleNodeRoutingInfo::SpecificNode(Route::new(
+                    0,
+                    SlotAddr::ReplicaRequired,
+                ))),
+            )
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        let _: () = script
+            .key("key")
+            .invoke_async(&mut connection)
+            .await
+            .unwrap();
+    }
+
+    #[async_test]
     async fn async_cluster_basic_cmd() {
         let cluster = TestClusterContext::new();
 
